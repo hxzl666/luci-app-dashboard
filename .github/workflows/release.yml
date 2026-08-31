@@ -165,17 +165,20 @@ jobs:
             ext="apk"
           fi
 
+          echo "## Collect 诊断 (ver=$ver, ext=$ext)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- sdk_arch: ${{ matrix.sdk_arch }}" >> "$GITHUB_STEP_SUMMARY"
+
           echo "All built packages (${ext}):"
-          find bin -type f -name "*.${ext}" | sort
+          find bin -type f -name "*.${ext}" | sort | tee -a "$GITHUB_STEP_SUMMARY" | sed 's/^/  /'
 
           # ipk 命名: dashboard-core_0.2.0-1_arch.ipk (下划线)
           # apk 命名: dashboard-core-0.2.0-r1.apk (横线)
           # 统一用 dashboard-core[_-]* 匹配两种格式
           core_pkg="$(find bin -type f \( -name "dashboard-core_*.${ext}" -o -name "dashboard-core-*.${ext}" \) | sort | head -n 1)"
+          echo "- core_pkg: \`${core_pkg:-EMPTY}\`" >> "$GITHUB_STEP_SUMMARY"
           if [ -z "$core_pkg" ]; then
-            echo "::error::DEBUG bin tree:"
-            find bin -type f 2>/dev/null | sort | head -50 || true
-            echo "::error::DEBUG find dashboard-core: $(find bin -type f \( -name "dashboard-core_*.${ext}" -o -name "dashboard-core-*.${ext}" \) 2>/dev/null | tr '\n' ' ')"
+            echo "- 全部 core 相关文件:" >> "$GITHUB_STEP_SUMMARY"
+            find bin -type f -iname "*dashboard*" 2>/dev/null | sort | tee -a "$GITHUB_STEP_SUMMARY" | sed 's/^/  /' || true
             echo "Missing dashboard-core ${ext}" && exit 1
           fi
 
@@ -187,11 +190,8 @@ jobs:
             # apk: 从路径 bin/packages/<arch>/action/ 提取架构
             core_arch="$(echo "$core_pkg" | sed -E 's|.*bin/packages/([^/]+)/action/.*|\1|')"
           fi
+          echo "- core_arch: \`${core_arch:-EMPTY}\`" >> "$GITHUB_STEP_SUMMARY"
           test -n "$core_arch" || (echo "::error::Cannot parse dashboard-core architecture from $core_pkg" && exit 1)
-
-          echo "::debug::core_pkg=$core_pkg"
-          echo "::debug::core_arch=$core_arch"
-          echo "::debug::ext=$ext suffix=$suffix"
 
           cp -f "$core_pkg" "dist/dashboard-core-${core_arch}${suffix}.${ext}"
           core_out="dist/dashboard-core-${core_arch}${suffix}"
@@ -209,17 +209,18 @@ jobs:
 
           # ipk = ar 归档；apk = gzip tar（v3）或 tar（v2）。两种都尝试。
           if ar t "$core_pkg" >/dev/null 2>&1; then
+            echo "- 提取: ar 归档检测成功" >> "$GITHUB_STEP_SUMMARY"
             (
               cd "$core_tmp"
               ar x "$GITHUB_WORKSPACE/$core_pkg"
             )
             data_tar="$(find "$core_tmp" -maxdepth 1 -type f -name 'data.tar.*' | sort | head -n 1)"
-            echo "::debug::ar detected, data_tar=$data_tar"
+            echo "- data_tar: \`${data_tar:-EMPTY}\`" >> "$GITHUB_STEP_SUMMARY"
             if [ -n "$data_tar" ]; then
               extract_from_tar "$data_tar" && extract_ok=1 || true
             fi
           else
-            echo "::debug::not ar archive"
+            echo "- 提取: 非 ar 归档，尝试 tar" >> "$GITHUB_STEP_SUMMARY"
           fi
 
           if [ "$extract_ok" -ne 1 ]; then
@@ -232,8 +233,10 @@ jobs:
           fi
 
           rm -rf "$core_tmp"
+          echo "- extract_ok: $extract_ok" >> "$GITHUB_STEP_SUMMARY"
           test "$extract_ok" -eq 1 || (echo "Cannot extract dashboard-core from $core_pkg" && file "$core_pkg" && exit 1)
           core_size="$(wc -c < "$core_out")"
+          echo "- core_size: $core_size bytes" >> "$GITHUB_STEP_SUMMARY"
           test "$core_size" -gt 4096 || (echo "Extracted dashboard-core looks too small: ${core_size} bytes" && exit 1)
 
           aliases="${{ matrix.aliases }}"
