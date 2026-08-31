@@ -207,7 +207,8 @@ jobs:
             tar -xOf "$archive" "$entry" > "$core_out"
           }
 
-          # ipk = ar 归档；apk = gzip tar（v3）或 tar（v2）。两种都尝试。
+          # ipk = ar 归档 或 tar 格式（外层 debian-binary+control.tar.gz+data.tar.gz）
+          # apk = gzip/tar。都试。核心：二进制在 data.tar.gz 内层，需递归提取
           if ar t "$core_pkg" >/dev/null 2>&1; then
             echo "- 提取: ar 归档检测成功" >> "$GITHUB_STEP_SUMMARY"
             (
@@ -219,16 +220,38 @@ jobs:
             if [ -n "$data_tar" ]; then
               extract_from_tar "$data_tar" && extract_ok=1 || true
             fi
-          else
-            echo "- 提取: 非 ar 归档，尝试 tar" >> "$GITHUB_STEP_SUMMARY"
           fi
 
           if [ "$extract_ok" -ne 1 ]; then
-            # 尝试直接当 tar 处理（apk v2/v3 或 gzip 压缩的 tar）
+            # 尝试直接当 tar 处理（tar 格式 ipk / apk v2/v3）
             if tar -tf "$core_pkg" >/dev/null 2>&1; then
-              extract_from_tar "$core_pkg" && extract_ok=1 || true
+              echo "- tar 分支: 外层 tar 直接可读" >> "$GITHUB_STEP_SUMMARY"
+              # 若外层 tar 内含 data.tar.*（tar 格式 ipk），先解出内层再提取
+              data_entry="$(tar -tf "$core_pkg" | grep -E '(^|/)data\.tar\.' | head -n 1 || true)"
+              if [ -n "$data_entry" ]; then
+                data_archive="$core_tmp/$(basename "$data_entry")"
+                tar -xOf "$core_pkg" "$data_entry" > "$data_archive" || true
+                echo "- 提取内层: $data_entry" >> "$GITHUB_STEP_SUMMARY"
+                if [ -s "$data_archive" ]; then
+                  extract_from_tar "$data_archive" && extract_ok=1 || true
+                fi
+              fi
+              if [ "$extract_ok" -ne 1 ]; then
+                extract_from_tar "$core_pkg" && extract_ok=1 || true
+              fi
             elif tar -tzf "$core_pkg" >/dev/null 2>&1; then
-              extract_from_tar "$core_pkg" && extract_ok=1 || true
+              echo "- tar -z 分支: gzip tar" >> "$GITHUB_STEP_SUMMARY"
+              data_entry="$(tar -tzf "$core_pkg" | grep -E '(^|/)data\.tar\.' | head -n 1 || true)"
+              if [ -n "$data_entry" ]; then
+                data_archive="$core_tmp/$(basename "$data_entry")"
+                tar -xzOf "$core_pkg" "$data_entry" > "$data_archive" || true
+                if [ -s "$data_archive" ]; then
+                  extract_from_tar "$data_archive" && extract_ok=1 || true
+                fi
+              fi
+              if [ "$extract_ok" -ne 1 ]; then
+                extract_from_tar "$core_pkg" && extract_ok=1 || true
+              fi
             fi
           fi
 
