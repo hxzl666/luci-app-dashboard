@@ -187,7 +187,11 @@ jobs:
             # apk: 从路径 bin/packages/<arch>/action/ 提取架构
             core_arch="$(echo "$core_pkg" | sed -E 's|.*bin/packages/([^/]+)/action/.*|\1|')"
           fi
-          test -n "$core_arch" || (echo "Cannot parse dashboard-core architecture from $core_pkg" && exit 1)
+          test -n "$core_arch" || (echo "::error::Cannot parse dashboard-core architecture from $core_pkg" && exit 1)
+
+          echo "::debug::core_pkg=$core_pkg"
+          echo "::debug::core_arch=$core_arch"
+          echo "::debug::ext=$ext suffix=$suffix"
 
           cp -f "$core_pkg" "dist/dashboard-core-${core_arch}${suffix}.${ext}"
           core_out="dist/dashboard-core-${core_arch}${suffix}"
@@ -197,6 +201,7 @@ jobs:
             archive="$1"
             entry="$(tar -tf "$archive" 2>/dev/null | grep -E '(^|/)usr/bin/dashboard-core$' | head -n 1 || true)"
             if [ -z "$entry" ]; then
+              echo "::error::DEBUG no usr/bin/dashboard-core in $archive; entries: $(tar -tf "$archive" 2>&1 | head -10 | tr '\n' ' ')"
               return 1
             fi
             tar -xOf "$archive" "$entry" > "$core_out"
@@ -209,9 +214,12 @@ jobs:
               ar x "$GITHUB_WORKSPACE/$core_pkg"
             )
             data_tar="$(find "$core_tmp" -maxdepth 1 -type f -name 'data.tar.*' | sort | head -n 1)"
+            echo "::debug::ar detected, data_tar=$data_tar"
             if [ -n "$data_tar" ]; then
               extract_from_tar "$data_tar" && extract_ok=1 || true
             fi
+          else
+            echo "::debug::not ar archive"
           fi
 
           if [ "$extract_ok" -ne 1 ]; then
