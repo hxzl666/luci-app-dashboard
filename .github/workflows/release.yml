@@ -171,7 +171,7 @@ jobs:
           # ipk 命名: dashboard-core_0.2.0-1_arch.ipk (下划线)
           # apk 命名: dashboard-core-0.2.0-r1.apk (横线)
           # 统一用 dashboard-core[_-]* 匹配两种格式
-          core_pkg="$(find bin -type f \( -name "dashboard-core_*.${ext}" -o -name "dashboard-core-*.${ext}" \) ! -name "dashboard-core-*-[a-z]*" | sort | head -n 1)"
+          core_pkg="$(find bin -type f \( -name "dashboard-core_*.${ext}" -o -name "dashboard-core-*.${ext}" \) | sort | head -n 1)"
           if [ -z "$core_pkg" ]; then
             echo "::error::DEBUG bin tree:"
             find bin -type f 2>/dev/null | sort | head -50 || true
