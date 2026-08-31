@@ -68,8 +68,10 @@ jobs:
           echo "All built packages (${ext}):"
           find bin -type f -name "*.${ext}" | sort
 
-          app_pkg="$(find bin -type f -name "luci-app-dashboard_*.${ext}" | sort | head -n 1)"
-          i18n_pkg="$(find bin -type f -name "luci-i18n-dashboard-zh-cn_*.${ext}" | sort | head -n 1)"
+          # ipk 命名: luci-app-dashboard_0.2.0-1_all.ipk (下划线)
+          # apk 命名: luci-app-dashboard-0.2.0-r1.apk (横线)
+          app_pkg="$(find bin -type f \( -name "luci-app-dashboard_*.${ext}" -o -name "luci-app-dashboard-*.${ext}" \) ! -name "luci-i18n-*" | sort | head -n 1)"
+          i18n_pkg="$(find bin -type f \( -name "luci-i18n-dashboard-zh-cn_*.${ext}" -o -name "luci-i18n-dashboard-zh-cn-*.${ext}" \) | sort | head -n 1)"
 
           if [ -z "$app_pkg" ] || [ -z "$i18n_pkg" ]; then
             echo "::error::DEBUG bin tree:"
@@ -166,15 +168,25 @@ jobs:
           echo "All built packages (${ext}):"
           find bin -type f -name "*.${ext}" | sort
 
-          core_pkg="$(find bin -type f -name "dashboard-core_*.${ext}" | sort | head -n 1)"
+          # ipk 命名: dashboard-core_0.2.0-1_arch.ipk (下划线)
+          # apk 命名: dashboard-core-0.2.0-r1.apk (横线)
+          # 统一用 dashboard-core[_-]* 匹配两种格式
+          core_pkg="$(find bin -type f \( -name "dashboard-core_*.${ext}" -o -name "dashboard-core-*.${ext}" \) ! -name "dashboard-core-*-[a-z]*" | sort | head -n 1)"
           if [ -z "$core_pkg" ]; then
             echo "::error::DEBUG bin tree:"
             find bin -type f 2>/dev/null | sort | head -50 || true
-            echo "::error::DEBUG find dashboard-core_*.${ext}: $(find bin -type f -name "dashboard-core_*.${ext}" 2>/dev/null | tr '\n' ' ')"
+            echo "::error::DEBUG find dashboard-core: $(find bin -type f \( -name "dashboard-core_*.${ext}" -o -name "dashboard-core-*.${ext}" \) 2>/dev/null | tr '\n' ' ')"
             echo "Missing dashboard-core ${ext}" && exit 1
           fi
 
-          core_arch="$(basename "$core_pkg" ".${ext}" | sed -E 's/^dashboard-core_[^_]+_(.+)$/\1/')"
+          # ipk: dashboard-core_0.2.0-1_aarch64_generic.ipk → arch=aarch64_generic
+          # apk: bin/packages/aarch64_cortex-a53/action/dashboard-core-0.2.0-r1.apk → arch 从路径提取
+          if [ "$ext" = "ipk" ]; then
+            core_arch="$(basename "$core_pkg" ".${ext}" | sed -E 's/^dashboard-core_[^_]+_(.+)$/\1/')"
+          else
+            # apk: 从路径 bin/packages/<arch>/action/ 提取架构
+            core_arch="$(echo "$core_pkg" | sed -E 's|.*bin/packages/([^/]+)/action/.*|\1|')"
+          fi
           test -n "$core_arch" || (echo "Cannot parse dashboard-core architecture from $core_pkg" && exit 1)
 
           cp -f "$core_pkg" "dist/dashboard-core-${core_arch}${suffix}.${ext}"
