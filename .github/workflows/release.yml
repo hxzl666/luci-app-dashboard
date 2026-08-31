@@ -16,8 +16,16 @@ env:
 
 jobs:
   build-luci:
-    name: Build LuCI packages
+    name: Build LuCI packages (${{ matrix.sdk_arch }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sdk_arch: mediatek-filogic-24.10.5
+            ver: "24.10"
+          - sdk_arch: mediatek-filogic-25.12.5
+            ver: "25.12"
 
     steps:
       - name: Checkout
@@ -36,7 +44,7 @@ jobs:
       - name: Build LuCI package
         uses: openwrt/gh-action-sdk@main
         env:
-          ARCH: mediatek-filogic-24.10.5
+          ARCH: ${{ matrix.sdk_arch }}
           FEED_DIR: ${{ github.workspace }}/.feed
           PACKAGES: luci-app-dashboard
           NO_REFRESH_CHECK: true
@@ -48,17 +56,26 @@ jobs:
           rm -rf dist
           mkdir -p dist
 
-          echo "All built IPKs:"
-          find bin -type f -name '*.ipk' | sort
+          ver="${{ matrix.ver }}"
+          if [ "$ver" = "24.10" ]; then
+            suffix=""
+            ext="ipk"
+          else
+            suffix="-$ver"
+            ext="apk"
+          fi
 
-          app_ipk="$(find bin -type f -name 'luci-app-dashboard_*.ipk' | sort | head -n 1)"
-          i18n_ipk="$(find bin -type f -name 'luci-i18n-dashboard-zh-cn_*.ipk' | sort | head -n 1)"
+          echo "All built packages (${ext}):"
+          find bin -type f -name "*.${ext}" | sort
 
-          test -n "$app_ipk" || (echo "Missing luci-app-dashboard ipk" && exit 1)
-          test -n "$i18n_ipk" || (echo "Missing luci-i18n-dashboard-zh-cn ipk" && exit 1)
+          app_pkg="$(find bin -type f -name "luci-app-dashboard_*.${ext}" | sort | head -n 1)"
+          i18n_pkg="$(find bin -type f -name "luci-i18n-dashboard-zh-cn_*.${ext}" | sort | head -n 1)"
 
-          cp -f "$app_ipk" dist/luci-app-dashboard.ipk
-          cp -f "$i18n_ipk" dist/luci-i18n-dashboard-zh-cn.ipk
+          test -n "$app_pkg" || (echo "Missing luci-app-dashboard ${ext}" && exit 1)
+          test -n "$i18n_pkg" || (echo "Missing luci-i18n-dashboard-zh-cn ${ext}" && exit 1)
+
+          cp -f "$app_pkg" "dist/luci-app-dashboard${suffix}.${ext}"
+          cp -f "$i18n_pkg" "dist/luci-i18n-dashboard-zh-cn${suffix}.${ext}"
           cp -f install.sh dist/install.sh
           chmod 755 dist/install.sh
 
@@ -68,7 +85,7 @@ jobs:
       - name: Upload LuCI artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dashboard-luci-assets
+          name: dashboard-luci-assets-${{ matrix.ver }}
           path: dist/*
           if-no-files-found: error
 
@@ -80,12 +97,28 @@ jobs:
       matrix:
         include:
           - sdk_arch: mediatek-filogic-24.10.5
+            ver: "24.10"
             aliases: ""
           - sdk_arch: armsr-armv8-24.10.5
+            ver: "24.10"
             aliases: "aarch64 armv8"
           - sdk_arch: armsr-armv7-24.10.5
+            ver: "24.10"
             aliases: "armv7"
           - sdk_arch: x86-64-24.10.5
+            ver: "24.10"
+            aliases: "x86"
+          - sdk_arch: mediatek-filogic-25.12.5
+            ver: "25.12"
+            aliases: ""
+          - sdk_arch: armsr-armv8-25.12.5
+            ver: "25.12"
+            aliases: "aarch64 armv8"
+          - sdk_arch: armsr-armv7-25.12.5
+            ver: "25.12"
+            aliases: "armv7"
+          - sdk_arch: x86-64-25.12.5
+            ver: "25.12"
             aliases: "x86"
 
     steps:
@@ -117,17 +150,26 @@ jobs:
           rm -rf dist
           mkdir -p dist
 
-          echo "All built IPKs:"
-          find bin -type f -name '*.ipk' | sort
+          ver="${{ matrix.ver }}"
+          if [ "$ver" = "24.10" ]; then
+            suffix=""
+            ext="ipk"
+          else
+            suffix="-$ver"
+            ext="apk"
+          fi
 
-          core_ipk="$(find bin -type f -name 'dashboard-core_*.ipk' | sort | head -n 1)"
-          test -n "$core_ipk" || (echo "Missing dashboard-core ipk" && exit 1)
+          echo "All built packages (${ext}):"
+          find bin -type f -name "*.${ext}" | sort
 
-          core_arch="$(basename "$core_ipk" .ipk | sed -E 's/^dashboard-core_[^_]+_(.+)$/\1/')"
-          test -n "$core_arch" || (echo "Cannot parse dashboard-core architecture from $core_ipk" && exit 1)
+          core_pkg="$(find bin -type f -name "dashboard-core_*.${ext}" | sort | head -n 1)"
+          test -n "$core_pkg" || (echo "Missing dashboard-core ${ext}" && exit 1)
 
-          cp -f "$core_ipk" "dist/dashboard-core-${core_arch}.ipk"
-          core_out="dist/dashboard-core-${core_arch}"
+          core_arch="$(basename "$core_pkg" ".${ext}" | sed -E 's/^dashboard-core_[^_]+_(.+)$/\1/')"
+          test -n "$core_arch" || (echo "Cannot parse dashboard-core architecture from $core_pkg" && exit 1)
+
+          cp -f "$core_pkg" "dist/dashboard-core-${core_arch}${suffix}.${ext}"
+          core_out="dist/dashboard-core-${core_arch}${suffix}"
           core_tmp="$(mktemp -d)"
           extract_ok=0
           extract_from_tar() {
@@ -139,10 +181,11 @@ jobs:
             tar -xOf "$archive" "$entry" > "$core_out"
           }
 
-          if ar t "$core_ipk" >/dev/null 2>&1; then
+          # ipk = ar 归档；apk = gzip tar（v3）或 tar（v2）。两种都尝试。
+          if ar t "$core_pkg" >/dev/null 2>&1; then
             (
               cd "$core_tmp"
-              ar x "$GITHUB_WORKSPACE/$core_ipk"
+              ar x "$GITHUB_WORKSPACE/$core_pkg"
             )
             data_tar="$(find "$core_tmp" -maxdepth 1 -type f -name 'data.tar.*' | sort | head -n 1)"
             if [ -n "$data_tar" ]; then
@@ -150,29 +193,24 @@ jobs:
             fi
           fi
 
-          if [ "$extract_ok" -ne 1 ] && tar -tf "$core_ipk" >/dev/null 2>&1; then
-            data_entry="$(tar -tf "$core_ipk" | grep -E '(^|/)data\.tar\.' | head -n 1 || true)"
-            if [ -n "$data_entry" ]; then
-              data_archive="$core_tmp/$(basename "$data_entry")"
-              tar -xOf "$core_ipk" "$data_entry" > "$data_archive" || true
-              if [ -s "$data_archive" ]; then
-                extract_from_tar "$data_archive" && extract_ok=1 || true
-              fi
-            fi
-            if [ "$extract_ok" -ne 1 ]; then
-              extract_from_tar "$core_ipk" && extract_ok=1 || true
+          if [ "$extract_ok" -ne 1 ]; then
+            # 尝试直接当 tar 处理（apk v2/v3 或 gzip 压缩的 tar）
+            if tar -tf "$core_pkg" >/dev/null 2>&1; then
+              extract_from_tar "$core_pkg" && extract_ok=1 || true
+            elif tar -tzf "$core_pkg" >/dev/null 2>&1; then
+              extract_from_tar "$core_pkg" && extract_ok=1 || true
             fi
           fi
 
           rm -rf "$core_tmp"
-          test "$extract_ok" -eq 1 || (echo "Cannot extract dashboard-core from $core_ipk" && file "$core_ipk" && exit 1)
+          test "$extract_ok" -eq 1 || (echo "Cannot extract dashboard-core from $core_pkg" && file "$core_pkg" && exit 1)
           core_size="$(wc -c < "$core_out")"
           test "$core_size" -gt 4096 || (echo "Extracted dashboard-core looks too small: ${core_size} bytes" && exit 1)
 
           aliases="${{ matrix.aliases }}"
           for alias in $aliases; do
-            cp -f "$core_ipk" "dist/dashboard-core-${alias}.ipk"
-            cp -f "$core_out" "dist/dashboard-core-${alias}"
+            cp -f "$core_pkg" "dist/dashboard-core-${alias}${suffix}.${ext}"
+            cp -f "$core_out" "dist/dashboard-core-${alias}${suffix}"
           done
           chmod 755 dist/dashboard-core-*
 
@@ -198,8 +236,9 @@ jobs:
       - name: Download LuCI artifacts
         uses: actions/download-artifact@v4
         with:
-          name: dashboard-luci-assets
+          pattern: dashboard-luci-assets-*
           path: dist
+          merge-multiple: true
 
       - name: Download backend artifacts
         uses: actions/download-artifact@v4
@@ -214,14 +253,21 @@ jobs:
           ls -lah dist
 
           test -f dist/install.sh || (echo "Missing install.sh" && exit 1)
-          test -f dist/luci-app-dashboard.ipk || (echo "Missing luci-app-dashboard.ipk" && exit 1)
-          test -f dist/luci-i18n-dashboard-zh-cn.ipk || (echo "Missing luci-i18n-dashboard-zh-cn.ipk" && exit 1)
+          test -f dist/luci-app-dashboard.ipk || (echo "Missing luci-app-dashboard.ipk (24.10)" && exit 1)
+          test -f dist/luci-i18n-dashboard-zh-cn.ipk || (echo "Missing luci-i18n-dashboard-zh-cn.ipk (24.10)" && exit 1)
+          test -f dist/luci-app-dashboard-25.12.apk || (echo "Missing luci-app-dashboard-25.12.apk" && exit 1)
+          test -f dist/luci-i18n-dashboard-zh-cn-25.12.apk || (echo "Missing luci-i18n-dashboard-zh-cn-25.12.apk" && exit 1)
           compgen -G "dist/dashboard-core-*" >/dev/null || (echo "Missing dashboard-core assets" && exit 1)
-          compgen -G "dist/dashboard-core-*.ipk" >/dev/null || (echo "Missing dashboard-core architecture IPKs" && exit 1)
-          test -f dist/dashboard-core-aarch64.ipk || (echo "Missing dashboard-core-aarch64.ipk" && exit 1)
-          test -f dist/dashboard-core-armv8.ipk || (echo "Missing dashboard-core-armv8.ipk" && exit 1)
-          test -f dist/dashboard-core-armv7.ipk || (echo "Missing dashboard-core-armv7.ipk" && exit 1)
-          test -f dist/dashboard-core-x86.ipk || (echo "Missing dashboard-core-x86.ipk" && exit 1)
+          compgen -G "dist/dashboard-core-*.ipk" >/dev/null || (echo "Missing dashboard-core 24.10 IPKs" && exit 1)
+          compgen -G "dist/dashboard-core-*.apk" >/dev/null || (echo "Missing dashboard-core 25.12 APKs" && exit 1)
+          test -f dist/dashboard-core-aarch64.ipk || (echo "Missing dashboard-core-aarch64.ipk (24.10)" && exit 1)
+          test -f dist/dashboard-core-armv8.ipk || (echo "Missing dashboard-core-armv8.ipk (24.10)" && exit 1)
+          test -f dist/dashboard-core-armv7.ipk || (echo "Missing dashboard-core-armv7.ipk (24.10)" && exit 1)
+          test -f dist/dashboard-core-x86.ipk || (echo "Missing dashboard-core-x86.ipk (24.10)" && exit 1)
+          test -f dist/dashboard-core-aarch64-25.12.apk || (echo "Missing dashboard-core-aarch64-25.12.apk" && exit 1)
+          test -f dist/dashboard-core-armv8-25.12.apk || (echo "Missing dashboard-core-armv8-25.12.apk" && exit 1)
+          test -f dist/dashboard-core-armv7-25.12.apk || (echo "Missing dashboard-core-armv7-25.12.apk" && exit 1)
+          test -f dist/dashboard-core-x86-25.12.apk || (echo "Missing dashboard-core-x86-25.12.apk" && exit 1)
           ! compgen -G "dist/dashboard-core.ipk" >/dev/null || (echo "dashboard-core.ipk must not be released as a generic asset" && exit 1)
           ! compgen -G "dist/kmod-dashboard-monitor_*.ipk" >/dev/null || (echo "kmod assets must not be released" && exit 1)
 

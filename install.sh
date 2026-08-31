@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="${REPO:-hxzlplp7/luci-app-dashboard}"
+REPO="${REPO:-hxzl666/luci-app-dashboard}"
 VERSION="${VERSION:-latest}"
 INSTALL_DIR="${INSTALL_DIR:-}"
 CORE_BIN="/usr/bin/dashboard-core"

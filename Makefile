@@ -6,7 +6,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-dashboard
-PKG_VERSION:=0.0.9
+PKG_VERSION:=0.2.0
 PKG_RELEASE:=1
 PKG_MAINTAINER:=dashboard-community
 
@@ -28,7 +28,7 @@ FEATURE_ROOT="/etc/appfilter"
 FEATURE_FILE="$${FEATURE_ROOT}/feature.cfg"
 VERSION_FILE="$${FEATURE_ROOT}/version.txt"
 ICON_DST="/www/luci-static/resources/app_icons"
-DEFAULT_VERSION="v25.9.29"
+DEFAULT_VERSION="v26.4.10"
 
 if [ ! -f "$${ROOT}$${FEATURE_FILE}" ] && [ -f "$${ROOT}$${DEFAULT_DIR}/feature.cfg" ]; then
 	mkdir -p "$${ROOT}$${FEATURE_ROOT}"

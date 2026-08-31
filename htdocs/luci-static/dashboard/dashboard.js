@@ -899,27 +899,54 @@
             const tr = await apiRequest('traffic');
             if (tr) {
                 const now = Date.now();
-                const sample = deriveTrafficSnapshot(tr, trafficState, now);
-                const uS = Math.max(0, Number(sample.txRate) || 0);
-                const dS = Math.max(0, Number(sample.rxRate) || 0);
-                const tm = new Date().toTimeString().split(' ')[0];
-
-                if (tD.length > 0 && tD[tD.length - 1] === tm) {
-                    dD[dD.length - 1] = dS;
-                    uD[uD.length - 1] = uS;
+                let uS = 0, dS = 0;
+                // 优先使用后端历史序列（对齐 luci-app-quickstart 的 network.statistics 结构）
+                const hist = tr.history || {};
+                const slots = Number(hist.slots) || 80;
+                const items = Array.isArray(hist.items) ? hist.items : [];
+                if (items.length > 0) {
+                    // 补齐到 slots 长度（头部补零，与 quickstart 一致）
+                    let k = items.slice();
+                    for (; k.length < slots; ) {
+                        k = [{ downloadSpeed: 0, uploadSpeed: 0, startTime: 0, endTime: 0 }].concat(k);
+                    }
+                    const series = k.slice();
+                    const last = series[series.length - 1] || {};
+                    dS = Math.max(0, Number(last.downloadSpeed) || 0);
+                    uS = Math.max(0, Number(last.uploadSpeed) || 0);
+                    // 用 endTime 生成时间标签（格式化 HH:mm:ss）
+                    const labels = series.map(it => {
+                        const t = Number(it.endTime) || 0;
+                        if (t <= 0) return '';
+                        const dt = new Date(t * 1000);
+                        const pad = (x) => String(x).padStart(2, '0');
+                        return `${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+                    });
+                    tD = labels;
+                    dD = series.map(it => Math.max(0, Number(it.downloadSpeed) || 0));
+                    uD = series.map(it => Math.max(0, Number(it.uploadSpeed) || 0));
                 } else {
-                    tD.push(tm);
-                    dD.push(dS);
-                    uD.push(uS);
-                    if (tD.length > 20) {
-                        tD.shift();
-                        dD.shift();
-                        uD.shift();
+                    const sample = deriveTrafficSnapshot(tr, trafficState, now);
+                    uS = Math.max(0, Number(sample.txRate) || 0);
+                    dS = Math.max(0, Number(sample.rxRate) || 0);
+                    const tm = new Date().toTimeString().split(' ')[0];
+                    if (tD.length > 0 && tD[tD.length - 1] === tm) {
+                        dD[dD.length - 1] = dS;
+                        uD[uD.length - 1] = uS;
+                    } else {
+                        tD.push(tm);
+                        dD.push(dS);
+                        uD.push(uS);
+                        if (tD.length > 20) {
+                            tD.shift();
+                            dD.shift();
+                            uD.shift();
+                        }
                     }
                 }
                 lineChart.setOption({ xAxis: { data: tD }, series: [{ data: dD }, { data: uD }] });
-                trafficState = sample.nextState;
-                
+                trafficState = null;
+
                 const fmtTx = formatBytes(tr.tx_bytes).split(' ');
                 const fmtRx = formatBytes(tr.rx_bytes).split(' ');
                 if(document.getElementById('summary-tx')) document.getElementById('summary-tx').innerText = fmtTx[0];

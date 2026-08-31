@@ -142,6 +142,7 @@ unsigned int sleep(unsigned int seconds);
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 #endif
 
 #define DEFAULT_LISTEN_HOST "127.0.0.1"
@@ -160,6 +161,16 @@ struct traffic_state {
     unsigned long long tx;
     unsigned long long rx;
     time_t ts;
+    /* 历史采样环形缓冲（对齐 luci-app-quickstart 的 network.statistics 结构） */
+    struct traffic_sample {
+        unsigned long long down;
+        unsigned long long up;
+        time_t start;
+        time_t end;
+    } hist[80];
+    int hist_count;
+    int hist_head;
+    time_t hist_last_ts;
 };
 
 struct cpu_state {
@@ -167,6 +178,18 @@ struct cpu_state {
     unsigned long long total;
     bool valid;
 };
+
+#ifdef _WIN32
+/* Windows 静态分析打桩：不启用后台线程 */
+#define traffic_lock() do {} while (0)
+#define traffic_unlock() do {} while (0)
+#else
+static pthread_mutex_t g_traffic_lock = PTHREAD_MUTEX_INITIALIZER;
+#define traffic_lock() pthread_mutex_lock(&g_traffic_lock)
+#define traffic_unlock() pthread_mutex_unlock(&g_traffic_lock)
+static void *traffic_sampler_thread(void *arg);
+static void start_traffic_sampler(void);
+#endif
 
 struct device {
     char ip[64];
@@ -590,6 +613,15 @@ static void append_network_status(struct buffer *b, const char *iface)
     json_string(b, online ? "default-route" : "no-default-route");
     buf_append(b, ",\"interface\":");
     json_string(b, iface ? iface : "");
+    {
+        /* 网络在线时间：对齐 LuCI network.uptime_raw，供前端在线时间展示 */
+        char uptime_line[128] = "";
+        unsigned long net_uptime = 0;
+        if (read_first_line("/proc/uptime", uptime_line, sizeof(uptime_line))) {
+            net_uptime = (unsigned long)strtod(uptime_line, NULL);
+        }
+        buf_printf(b, ",\"network_uptime_raw\":%lu", net_uptime);
+    }
     buf_append(b, ",\"lan\":{\"ip\":");
     json_string(b, lan_ip);
     buf_append(b, ",\"dns\":[");
@@ -605,7 +637,7 @@ static void append_network_status(struct buffer *b, const char *iface)
     buf_append(b, "]}}");
 }
 
-static void append_traffic(struct buffer *b, const char *iface)
+static void sample_traffic_locked(const char *iface)
 {
     char path[256];
     unsigned long long tx = 0, rx = 0;
@@ -621,25 +653,105 @@ static void append_traffic(struct buffer *b, const char *iface)
 
     if (g_traffic.ts > 0 && strcmp(g_traffic.iface, iface ? iface : "") == 0 && now > g_traffic.ts) {
         unsigned long dt = (unsigned long)(now - g_traffic.ts);
-        if (tx >= g_traffic.tx) {
-            tx_rate = (tx - g_traffic.tx) / dt;
+        if (dt > 0) {
+            if (tx >= g_traffic.tx) {
+                tx_rate = (tx - g_traffic.tx) / dt;
+            }
+            if (rx >= g_traffic.rx) {
+                rx_rate = (rx - g_traffic.rx) / dt;
+            }
         }
-        if (rx >= g_traffic.rx) {
-            rx_rate = (rx - g_traffic.rx) / dt;
+    }
+
+    /* 历史采样：每 5 秒一个点（对齐 luci-app-quickstart 的 5s 节奏，无论是否有人看页面都在记录） */
+    if (g_traffic.hist_last_ts == 0 || now - g_traffic.hist_last_ts >= 5) {
+        int slot = 0;
+        if (g_traffic.hist_count < (int)(sizeof(g_traffic.hist) / sizeof(g_traffic.hist[0]))) {
+            slot = g_traffic.hist_count;
+            g_traffic.hist_count++;
+        } else {
+            slot = g_traffic.hist_head;
+            g_traffic.hist_head = (g_traffic.hist_head + 1) % (int)(sizeof(g_traffic.hist) / sizeof(g_traffic.hist[0]));
         }
+        g_traffic.hist[slot].down = rx_rate;
+        g_traffic.hist[slot].up = tx_rate;
+        g_traffic.hist[slot].start = g_traffic.hist_last_ts > 0 ? g_traffic.hist_last_ts : now;
+        g_traffic.hist[slot].end = now;
+        g_traffic.hist_last_ts = now;
     }
 
     snprintf(g_traffic.iface, sizeof(g_traffic.iface), "%s", iface ? iface : "");
     g_traffic.tx = tx;
     g_traffic.rx = rx;
     g_traffic.ts = now;
+}
+
+static void append_traffic(struct buffer *b, const char *iface)
+{
+    unsigned long long tx_rate = 0, rx_rate = 0;
+    time_t now = time(NULL);
+
+    traffic_lock();
+    sample_traffic_locked(iface);
+
+    /* 当前速率取最新历史点（与 quickstart 一致：曲线尾点=当前速率） */
+    if (g_traffic.hist_count > 0) {
+        int last = (g_traffic.hist_head + g_traffic.hist_count - 1) % (int)(sizeof(g_traffic.hist) / sizeof(g_traffic.hist[0]));
+        rx_rate = g_traffic.hist[last].down;
+        tx_rate = g_traffic.hist[last].up;
+    }
 
     buf_append(b, "\"interface_traffic\":{");
     buf_append(b, "\"interface\":");
     json_string(b, iface ? iface : "");
-    buf_printf(b, ",\"tx_bytes\":%llu,\"rx_bytes\":%llu,\"tx_rate\":%llu,\"rx_rate\":%llu,\"sampled_at\":%ld,\"source\":\"dashboard-core\"}",
-               tx, rx, tx_rate, rx_rate, (long)now);
+    buf_printf(b, ",\"tx_bytes\":%llu,\"rx_bytes\":%llu,\"tx_rate\":%llu,\"rx_rate\":%llu,\"sampled_at\":%ld,\"source\":\"dashboard-core\",\"history\":{\"slots\":%d,\"items\":[",
+               g_traffic.tx, g_traffic.rx, tx_rate, rx_rate, (long)now,
+               (int)(sizeof(g_traffic.hist) / sizeof(g_traffic.hist[0])));
+    /* 按时间顺序输出（从最旧到最新），字段名对齐 quickstart：downloadSpeed/uploadSpeed/startTime/endTime */
+    {
+        int total = g_traffic.hist_count;
+        int n = 0;
+        for (int i = 0; i < total; i++) {
+            int idx = (g_traffic.hist_head + i) % (int)(sizeof(g_traffic.hist) / sizeof(g_traffic.hist[0]));
+            if (n > 0) buf_append(b, ",");
+            buf_printf(b, "{\"downloadSpeed\":%llu,\"uploadSpeed\":%llu,\"startTime\":%ld,\"endTime\":%ld}",
+                       g_traffic.hist[idx].down, g_traffic.hist[idx].up,
+                       (long)g_traffic.hist[idx].start, (long)g_traffic.hist[idx].end);
+            n++;
+        }
+    }
+    buf_append(b, "]}}");
+    traffic_unlock();
 }
+
+#ifndef _WIN32
+/* 后台常驻采样线程：每 1 秒采样一次（每 5 秒落一个历史点），
+ * 与 quickstart 的 network.statistics 后台采集一致——无论是否有人打开页面都在记录历史 */
+static void *traffic_sampler_thread(void *arg)
+{
+    (void)arg;
+    char iface[64];
+    for (;;) {
+        get_default_iface(iface, sizeof(iface));
+        traffic_lock();
+        sample_traffic_locked(iface);
+        traffic_unlock();
+        usleep(1000000);
+    }
+    return NULL;
+}
+
+static void start_traffic_sampler(void)
+{
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, traffic_sampler_thread, NULL) != 0) {
+        fprintf(stderr, "dashboard-core: failed to start traffic sampler thread\n");
+        return;
+    }
+    pthread_detach(tid);
+}
+#endif
+
 
 static int load_devices(struct device *devices, int max_devices)
 {
@@ -811,11 +923,9 @@ static const struct app_rule APP_RULES[] = {
     {"1688", "shopping", "1688.com"},
     {"17173游戏", "game", "17173.com"},
     {"1905电影", "video", "1905.com"},
-    {"1号店", "shopping", "yhd"},
     {"1号店", "shopping", "yhd.com"},
     {"2345", "developer", "m.2345.com"},
     {"2345", "developer", "www.2345.com"},
-    {"2345游戏", "game", "wan"},
     {"2345游戏", "game", "wan.2345.com"},
     {"360文库", "developer", "wenku"},
     {"360文库", "developer", "wenku.so.com"},
@@ -838,7 +948,6 @@ static const struct app_rule APP_RULES[] = {
     {"爱奇艺", "video", "inter"},
     {"爱奇艺", "video", "inter.71edge.com"},
     {"爱奇艺", "video", "iqiyi"},
-    {"爱奇艺", "video", "qy"},
     {"爱奇艺", "video", "qy.net"},
     {"爱奇艺", "video", "videos"},
     {"爱企查", "developer", "aiqicha"},
@@ -854,14 +963,11 @@ static const struct app_rule APP_RULES[] = {
     {"百度贴吧", "developer", "tieba.baidu.com"},
     {"百度文库", "developer", "wenku"},
     {"百度文库", "developer", "wenku.baidu.com"},
-    {"百度页游", "game", "wan"},
     {"百度页游", "game", "wan.baidu.com"},
-    {"百度游戏", "game", "wan"},
     {"百度游戏", "game", "wan.baidu.com"},
     {"百度知道", "developer", "zhidao"},
     {"百度知道", "developer", "zhidao.baidu.com"},
     {"百度直播", "video", "baidu"},
-    {"百度直播", "video", "live"},
     {"百度直播", "video", "live.baidu.com"},
     {"保卫萝卜4", "game", "luobo"},
     {"保卫萝卜4", "game", "s4.luobo.cn"},
@@ -897,23 +1003,19 @@ static const struct app_rule APP_RULES[] = {
     {"大街网", "social", "dajie.com"},
     {"当当网", "shopping", "dangdang"},
     {"当当网", "shopping", "dangdang.com"},
-    {"地下城与勇士", "game", "dnf"},
     {"地下城与勇士", "game", "dnf.qq.com"},
     {"地下城与勇士", "game", "dnfm"},
     {"地下城与勇士", "game", "dnfm.qq.com"},
     {"嘀哩嘀哩", "video", "dilidili"},
     {"嘀哩嘀哩", "video", "dilidili.io"},
-    {"第五人格", "game", "id5"},
     {"第五人格", "game", "id5.163.com"},
     {"第五人格", "game", "identityv"},
     {"第五人格", "game", "identityvgame.com"},
     {"第一财经", "developer", "yicai"},
     {"第一财经", "developer", "yicai.com"},
-    {"第一视频", "video", "v1"},
     {"第一视频", "video", "www.v1.cn"},
     {"叮咚买菜", "shopping", "ddxq"},
     {"叮咚买菜", "shopping", "ddxq.mobi"},
-    {"叮咚买菜", "shopping", "mobi"},
     {"钉钉", "social", "dingtalk"},
     {"动漫之家", "others", "dmzj"},
     {"动漫之家", "others", "dmzj.com"},
@@ -925,7 +1027,6 @@ static const struct app_rule APP_RULES[] = {
     {"抖音", "video", "ecombdapi.com"},
     {"抖音", "video", "pstatp"},
     {"抖音", "video", "pstatp.com"},
-    {"抖音", "video", "pull"},
     {"抖音", "video", "pull*.douyincdn.com"},
     {"抖音", "video", "volcsirius"},
     {"抖音", "video", "volcsirius.com"},
@@ -960,11 +1061,9 @@ static const struct app_rule APP_RULES[] = {
     {"赶集网", "social", "58cdn"},
     {"谷歌", "developer", "google"},
     {"谷歌", "developer", "google.com"},
-    {"光明网", "developer", "gmw"},
     {"光明网", "developer", "www.gmw.cn"},
     {"光遇", "game", "ma75.proxima.nie.netease"},
     {"光遇", "game", "ma75.update.netease.com"},
-    {"国际在线", "developer", "cri"},
     {"国际在线", "developer", "www.cri.cn"},
     {"国美", "shopping", "gome"},
     {"国美", "shopping", "gome.com"},
@@ -984,7 +1083,6 @@ static const struct app_rule APP_RULES[] = {
     {"红警OL", "game", "redalert.qq.com"},
     {"虎扑体育", "developer", "hupu"},
     {"虎扑体育", "developer", "hupu.com"},
-    {"虎牙直播", "video", "huya"},
     {"花椒直播", "video", "huajiao"},
     {"华数TV", "video", "wasu"},
     {"华数TV", "video", "wasu.cn"},
@@ -1003,7 +1101,6 @@ static const struct app_rule APP_RULES[] = {
     {"皇室战争", "game", "supercell"},
     {"皇室战争", "game", "supercell.com"},
     {"坚果云", "download", "jianguoyun"},
-    {"建设银行", "others", "ccb"},
     {"建设银行", "others", "ccb.com"},
     {"江苏卫视", "video", "jstv"},
     {"江苏卫视", "video", "tv.jstv.com"},
@@ -1011,11 +1108,9 @@ static const struct app_rule APP_RULES[] = {
     {"交通银行", "others", "bankcomm.com"},
     {"京东", "shopping", "300hu"},
     {"京东", "shopping", "360buyimg"},
-    {"京东", "shopping", "jd"},
     {"京东", "shopping", "jd.com"},
     {"京东", "shopping", "jdcdn"},
     {"京东", "shopping", "jdcdn.com"},
-    {"京东", "shopping", "vod"},
     {"京东", "shopping", "vod.300hu.com"},
     {"京东钱包", "others", "jdpay"},
     {"京东钱包", "others", "jdpay.com"},
@@ -1029,7 +1124,6 @@ static const struct app_rule APP_RULES[] = {
     {"看准", "social", "kanzhun"},
     {"看准", "social", "kanzhun.com"},
     {"考拉海购", "shopping", "kaola"},
-    {"酷6网", "video", "ku6"},
     {"酷6网", "video", "www.ku6.com"},
     {"酷狗短酷", "video", "bssdl"},
     {"酷狗短酷", "video", "bssdl.kugou"},
@@ -1050,19 +1144,14 @@ static const struct app_rule APP_RULES[] = {
     {"拉勾网", "social", "lagou"},
     {"拉勾网", "social", "lagou.com"},
     {"蓝奏云", "download", "lanzou"},
-    {"蓝奏云", "download", "pan"},
     {"蓝奏云", "download", "pan.lanzou.com"},
     {"懒人听书", "music", "lrts"},
     {"懒人听书", "music", "lrts.me"},
-    {"狼人杀", "game", "fp"},
-    {"狼人杀", "game", "lrs"},
     {"狼人杀", "game", "lrs.fp"},
     {"狼人杀", "game", "ma77"},
-    {"乐逗游戏", "game", "uu"},
     {"乐逗游戏", "game", "uu.cc"},
     {"乐嗨秀场", "video", "ehaitv"},
     {"乐嗨秀场", "video", "ehaitv.com"},
-    {"乐视视频", "video", "le"},
     {"乐视视频", "video", "www.le.com"},
     {"梨视频", "video", "pearvideo"},
     {"梨视频", "video", "pearvideo.com"},
@@ -1084,15 +1173,11 @@ static const struct app_rule APP_RULES[] = {
     {"炉石传说", "game", "hs.blizzard.cn"},
     {"驴妈妈", "developer", "lvmama"},
     {"驴妈妈", "developer", "lvmama.com"},
-    {"率土之滨", "game", "stzb"},
     {"率土之滨", "game", "stzb.163.com"},
     {"率土之滨", "game", "stzb163.com"},
     {"马蜂窝", "others", "mafengwo"},
     {"马蜂窝", "others", "mafengwo.cn"},
-    {"芒果tv", "video", "hitv"},
-    {"芒果tv", "video", "mgtv"},
     {"猫和老鼠", "game", "h18*.netease.com"},
-    {"猫扑", "developer", "mop"},
     {"猫扑", "developer", "mop.com"},
     {"美团", "others", "meituan"},
     {"梦幻西游", "game", "g18.proxima.nie"},
@@ -1105,7 +1190,6 @@ static const struct app_rule APP_RULES[] = {
     {"明日之后", "game", "g66.update.netease"},
     {"蘑菇街", "shopping", "mogucdn"},
     {"蘑菇街", "shopping", "mogujie"},
-    {"陌陌", "social", "momo"},
     {"南瓜电影", "video", "vcinema"},
     {"南瓜电影", "video", "vcinema.cn"},
     {"农业银行", "others", "abchina"},
@@ -1118,7 +1202,6 @@ static const struct app_rule APP_RULES[] = {
     {"跑跑卡丁车", "game", "popkart.tiancity.com"},
     {"拼多多", "shopping", "cdntip"},
     {"拼多多", "shopping", "pinduoduo"},
-    {"拼多多", "shopping", "s1p"},
     {"拼多多", "shopping", "s1p.cdntip.com"},
     {"拼多多", "shopping", "yangkeduo"},
     {"拼多多", "shopping", "yangkeduo.com"},
@@ -1128,7 +1211,6 @@ static const struct app_rule APP_RULES[] = {
     {"苹果官网", "developer", "www.apple.com"},
     {"朴朴超市", "shopping", "pupuapi"},
     {"朴朴超市", "shopping", "pupumall"},
-    {"浦发银行", "others", "spdb"},
     {"浦发银行", "others", "spdb.com.cn"},
     {"企鹅电竞", "video", "egame"},
     {"企鹅电竞", "video", "egame.qq"},
@@ -1143,15 +1225,11 @@ static const struct app_rule APP_RULES[] = {
     {"穷游网", "developer", "qyer.com"},
     {"求是网", "developer", "qstheory"},
     {"求是网", "developer", "qstheory.cn"},
-    {"全景网", "developer", "p5w"},
     {"全景网", "developer", "p5w.net"},
     {"人民网", "developer", "people"},
     {"人民网", "developer", "people.com.cn"},
-    {"人民银行", "others", "pbc"},
     {"人民银行", "others", "pbc.gov.cn"},
-    {"人人视频", "video", "rr"},
     {"人人视频", "video", "rr.tv"},
-    {"三角洲&穿越火线", "game", "cf"},
     {"三角洲&穿越火线", "game", "cf.qq.com"},
     {"三角洲&穿越火线", "game", "deltaforcegame"},
     {"三角洲&穿越火线", "game", "deltaforcegame.com"},
@@ -1173,9 +1251,7 @@ static const struct app_rule APP_RULES[] = {
     {"搜狐", "developer", "m.sohu.com"},
     {"搜狐", "developer", "sohu"},
     {"搜狐", "developer", "www.sohu.com"},
-    {"搜狐视频", "video", "aty"},
     {"搜狐视频", "video", "aty.sohu.com"},
-    {"搜狐视频", "video", "itc"},
     {"搜狐视频", "video", "sohu"},
     {"搜狐视频", "video", "tv.itc.cn"},
     {"搜视网", "video", "tvsou"},
@@ -1185,7 +1261,6 @@ static const struct app_rule APP_RULES[] = {
     {"太平洋电脑", "developer", "www.pconline.com.cn"},
     {"太平洋汽车", "developer", "pcauto"},
     {"太平洋汽车", "developer", "pcauto.com.cn"},
-    {"坦克世界", "game", "wot"},
     {"坦克世界", "game", "wot.360.cn"},
     {"探探", "social", "tancdn"},
     {"探探", "social", "tantanapp"},
@@ -1194,7 +1269,6 @@ static const struct app_rule APP_RULES[] = {
     {"淘宝", "shopping", "taobao"},
     {"淘宝", "shopping", "tmall"},
     {"淘宝", "shopping", "tmall.com"},
-    {"腾讯加速器", "game", "acc"},
     {"腾讯加速器", "game", "m.acc.qq.com"},
     {"腾讯微云", "download", "aegis"},
     {"腾讯微云", "download", "aegis.qq.com"},
@@ -1220,7 +1294,6 @@ static const struct app_rule APP_RULES[] = {
     {"途牛", "others", "tuniu.com"},
     {"王者荣耀", "game", "honorofkings"},
     {"王者荣耀", "game", "honorofkings.com"},
-    {"王者荣耀", "game", "pvp"},
     {"王者荣耀", "game", "pvp.qq.com"},
     {"王者荣耀", "game", "sgame"},
     {"王者荣耀更新", "download", "sgame"},
@@ -1237,20 +1310,16 @@ static const struct app_rule APP_RULES[] = {
     {"微信", "social", "weixin.qq"},
     {"唯品会", "shopping", "appsimg"},
     {"唯品会", "shopping", "appsimg.com"},
-    {"唯品会", "shopping", "vip"},
     {"唯品会", "shopping", "vip.com"},
     {"唯品会", "shopping", "vips-mobile"},
     {"唯品会", "shopping", "vipshop"},
     {"唯品会", "shopping", "vipstatic"},
     {"唯品会", "shopping", "vipstatic.com"},
     {"我的世界", "game", "g79mclobt.nie.netease"},
-    {"我的世界", "game", "mc"},
     {"我的世界", "game", "mc*.netease"},
     {"我的世界", "game", "netease"},
     {"我的世界", "game", "x19*.netease.com"},
-    {"我叫MT4", "game", "dir"},
     {"我叫MT4", "game", "dir.mt4.qq.com"},
-    {"我叫MT4", "game", "mt4"},
     {"我秀", "video", "oxiu"},
     {"我秀", "video", "oxiu.com"},
     {"西瓜视频", "video", "bdxigua"},
@@ -1262,7 +1331,6 @@ static const struct app_rule APP_RULES[] = {
     {"喜马拉雅", "music", "ximalaya.com"},
     {"虾米音乐", "music", "xiami"},
     {"闲鱼", "shopping", "xianyu"},
-    {"向日葵", "download", "oray"},
     {"向日葵", "download", "oray.com"},
     {"向日葵", "download", "oray.net"},
     {"潇湘书院", "developer", "xxsy"},
@@ -1305,9 +1373,7 @@ static const struct app_rule APP_RULES[] = {
     {"新浪体育", "developer", "sina"},
     {"新浪体育", "developer", "sports"},
     {"新浪体育", "developer", "sports.sina.com.cn"},
-    {"兴业银行", "others", "cib"},
     {"兴业银行", "others", "cib.com.cn"},
-    {"迅游加速器", "game", "mobi"},
     {"迅游加速器", "game", "xunyou"},
     {"迅游加速器", "game", "xunyou.mobi"},
     {"亚马逊", "shopping", "amazon"},
@@ -1327,7 +1393,6 @@ static const struct app_rule APP_RULES[] = {
     {"宜家家居", "shopping", "ikea.cn"},
     {"易车网", "developer", "bitauto"},
     {"易车网", "developer", "bitauto.com"},
-    {"音乐随心听", "music", "fm"},
     {"音乐随心听", "music", "fm.taihe.com"},
     {"音乐随心听", "music", "taihe"},
     {"音悦台", "music", "yinyuetai"},
@@ -1339,7 +1404,6 @@ static const struct app_rule APP_RULES[] = {
     {"英雄联盟手游", "game", "lolm.qq.com"},
     {"英雄联盟手游", "game", "wildrift"},
     {"英雄联盟手游", "game", "wildrift.leagueoflegends.com"},
-    {"萤石云", "others", "ys7"},
     {"萤石云", "others", "ys7.com"},
     {"映客直播", "video", "inke"},
     {"映客直播", "video", "inke.cn"},
@@ -1351,16 +1415,13 @@ static const struct app_rule APP_RULES[] = {
     {"游民星空", "game", "gamersky.com"},
     {"游侠网", "game", "ali213"},
     {"游侠网", "game", "ali213.net"},
-    {"有道词典", "others", "dict"},
     {"有道词典", "others", "dict.youdao.com"},
     {"有道词典", "others", "youdao"},
-    {"元梦之星", "game", "qq"},
     {"元梦之星", "game", "ymzx"},
     {"元梦之星", "game", "ymzx.qq.com"},
     {"原神", "game", "yuanshen"},
     {"原神", "game", "yuanshen.com"},
     {"云原神", "game", "mihoyo"},
-    {"云原神", "game", "ys"},
     {"云原神", "game", "ys.mihoyo.com"},
     {"战舰世界", "game", "wows"},
     {"战舰世界", "game", "wows.360.cn"},
@@ -1387,17 +1448,14 @@ static const struct app_rule APP_RULES[] = {
     {"中彩网", "developer", "zhcw"},
     {"中彩网", "developer", "zhcw.com"},
     {"中国电信", "developer", "www.189.cn"},
-    {"中国福利彩", "developer", "cwl"},
     {"中国福利彩", "developer", "www.cwl.gov.cn"},
     {"中国联通", "developer", "www.10010.com"},
     {"中国移动", "developer", "www.10086.cn"},
-    {"中国银行", "others", "boc"},
     {"中国银行", "others", "boc.cn"},
     {"中华网", "developer", "china"},
     {"中华网", "developer", "www.china.com"},
     {"中华英才网", "social", "chinahr"},
     {"中华英才网", "social", "chinahr.com"},
-    {"中经网", "developer", "ce"},
     {"中经网", "developer", "www.ce.cn"},
     {"中青网", "developer", "www.youth.cn"},
     {"中青网", "developer", "youth"},
@@ -1421,7 +1479,6 @@ static const struct app_rule APP_RULES[] = {
     {"Baidu", "search", "baidupcs.com"},
     {"Baidu", "search", "bdimg.com"},
     {"Baidu", "search", "bdstatic.com"},
-    {"BBC", "developer", "bbc"},
     {"BBC", "developer", "www.bbc.com"},
     {"Bilibili", "video", "bilibili.com"},
     {"Bilibili", "video", "bilivideo.com"},
@@ -1476,19 +1533,15 @@ static const struct app_rule APP_RULES[] = {
     {"hao123", "developer", "m.hao123.com"},
     {"hao123", "developer", "www.hao123.com"},
     {"hao123手游", "game", "hao123"},
-    {"hao123手游", "game", "sy"},
     {"hao123手游", "game", "sy.hao123.com"},
     {"hao123小游戏", "game", "hao123"},
-    {"hao123小游戏", "game", "xyx"},
     {"hao123小游戏", "game", "xyx.hao123.com"},
     {"hao123页游", "game", "hao123"},
-    {"hao123页游", "game", "wy"},
     {"hao123页游", "game", "wy.hao123.com"},
     {"hao123页游", "game", "wyyx"},
     {"hao123页游", "game", "wyyx.hao123.com"},
     {"hao123游戏", "game", "game.hao123.com"},
     {"hao123游戏", "game", "hao123"},
-    {"HM", "shopping", "hm"},
     {"HM", "shopping", "measurement"},
     {"HM", "shopping", "measurement.com"},
     {"HM", "shopping", "www.hm.com"},
@@ -1523,7 +1576,6 @@ static const struct app_rule APP_RULES[] = {
     {"Pinduoduo", "shopping", "pinduoduo.com"},
     {"Pinduoduo", "shopping", "yangkeduo.com"},
     {"PlayStation", "game", "playstation.com"},
-    {"PlayStation", "game", "psn"},
     {"QQ", "social", "qq.com"},
     {"QQ", "social", "qzone.qq.com"},
     {"QQ", "social", "smtcdns.com"},
@@ -1534,9 +1586,7 @@ static const struct app_rule APP_RULES[] = {
     {"QQ飞车", "game", "speedm.qq.com"},
     {"QQ音乐", "music", "amobile"},
     {"QQ音乐", "music", "amobile.music.tc.qq.com"},
-    {"QQ音乐", "music", "qq"},
     {"QQ音乐", "music", "qqmusic"},
-    {"QQ音乐", "music", "tc"},
     {"QQMusic", "music", "music.tc.qq.com"},
     {"QQMusic", "music", "qqmusic.qq.com"},
     {"QQMusic", "music", "y.qq.com"},
@@ -1556,9 +1606,7 @@ static const struct app_rule APP_RULES[] = {
     {"TikTok", "social", "byteoversea.com"},
     {"TikTok", "social", "musical.ly"},
     {"TikTok", "social", "tiktok.com"},
-    {"uu加速器", "game", "mg"},
     {"uu加速器", "game", "mg.uu.163.com"},
-    {"uu加速器", "game", "uu"},
     {"vimeo", "video", "vimeo"},
     {"vimeo", "video", "vimeo.com"},
     {"vivo官网", "developer", "vivo"},
@@ -1595,6 +1643,18 @@ static const struct app_rule APP_RULES[] = {
     {"YouTube", "video", "ytimg.com"},
     {"Zhihu", "social", "zhihu.com"},
     {"Zhihu", "social", "zhimg.com"},
+    {"芒果tv", "video", "mgtv.com"},
+
+    {"芒果tv", "video", "hitv.com"},
+
+    {"虎牙直播", "video", "huya.com"},
+
+    {"虎牙直播", "video", "huyacdn.com"},
+
+    {"陌陌", "social", "momo.com"},
+
+    {"陌陌", "social", "immomo.com"},
+
     {NULL, NULL, NULL}
 };
 
@@ -2739,6 +2799,10 @@ int main(int argc, char **argv)
     }
 
     signal(SIGPIPE, SIG_IGN);
+#ifndef _WIN32
+    start_traffic_sampler();
+#endif
+
 
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
