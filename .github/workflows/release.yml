@@ -197,36 +197,40 @@ jobs:
           core_out="dist/dashboard-core-${core_arch}${suffix}"
           core_tmp="$(mktemp -d)"
           extract_ok=0
-          extract_from_tar() {
-            archive="$1"
-            entry="$(tar -tf "$archive" 2>/dev/null | grep -E '(^|/)usr/bin/dashboard-core$' | head -n 1 || true)"
-            if [ -z "$entry" ]; then
-              echo "::error::DEBUG no usr/bin/dashboard-core in $archive; entries: $(tar -tf "$archive" 2>&1 | head -10 | tr '\n' ' ')"
-              return 1
-            fi
-            tar -xOf "$archive" "$entry" > "$core_out"
-          }
 
-          # ipk = ar 归档 或 tar 格式（外层 debian-binary+control.tar.gz+data.tar.gz）
-          # apk = gzip/tar。都试。核心：二进制在 data.tar.gz 内层，需递归提取
-          if ar t "$core_pkg" >/dev/null 2>&1; then
-            echo "- 提取: ar 归档检测成功" >> "$GITHUB_STEP_SUMMARY"
-            (
-              cd "$core_tmp"
-              ar x "$GITHUB_WORKSPACE/$core_pkg"
-            )
-            data_tar="$(find "$core_tmp" -maxdepth 1 -type f -name 'data.tar.*' | sort | head -n 1)"
-            echo "- data_tar: \`${data_tar:-EMPTY}\`" >> "$GITHUB_STEP_SUMMARY"
-            if [ -n "$data_tar" ]; then
-              extract_from_tar "$data_tar" && extract_ok=1 || true
+          if [ "$ext" = "apk" ]; then
+            # ---- apk v3 (ADB 容器) 格式：必须用 apk-tools 解包 ----
+            echo "- 提取: apk v3 容器 → apk-tools 解包" >> "$GITHUB_STEP_SUMMARY"
+            # runner 是 x86_64，下载静态 apk 二进制
+            APK_TOOL="$core_tmp/apk.static"
+            if ! curl -sL --max-time 60 -o "$APK_TOOL" "https://gitlab.alpinelinux.org/api/v4/projects/5/packages/generic/v3.0.8/x86_64/apk.static"; then
+              echo "::error::apk-tools 下载失败" && exit 1
             fi
-          fi
-
-          if [ "$extract_ok" -ne 1 ]; then
-            # 尝试直接当 tar 处理（tar 格式 ipk / apk v2/v3）
+            chmod +x "$APK_TOOL"
+            "$APK_TOOL" --version >/dev/null 2>&1 || { echo "::error::apk-tools 不是 x86_64 可执行" && exit 1; }
+            mkdir -p "$core_tmp/root"
+            ( cd "$core_tmp/root" && "$APK_TOOL" extract --allow-untrusted "$GITHUB_WORKSPACE/$core_pkg" >/dev/null 2>&1 )
+            if [ -f "$core_tmp/root/usr/bin/dashboard-core" ]; then
+              cp -f "$core_tmp/root/usr/bin/dashboard-core" "$core_out"
+              extract_ok=1
+              echo "- apk 解包成功 → usr/bin/dashboard-core" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::error::apk 解包后未找到 usr/bin/dashboard-core; 已解包文件: $(find "$core_tmp/root" -type f 2>/dev/null | head -10 | tr '\n' ' ')"
+            fi
+          else
+            # ---- ipk：tar 格式（外层 debian-binary+control.tar.gz+data.tar.gz）或 ar 归档 ----
+            extract_from_tar() {
+              archive="$1"
+              entry="$(tar -tf "$archive" 2>/dev/null | grep -E '(^|/)usr/bin/dashboard-core$' | head -n 1 || true)"
+              if [ -z "$entry" ]; then
+                echo "::error::DEBUG no usr/bin/dashboard-core in $archive; entries: $(tar -tf "$archive" 2>&1 | head -10 | tr '\n' ' ')"
+                return 1
+              fi
+              tar -xOf "$archive" "$entry" > "$core_out"
+            }
+            # 尝试直接当 tar 处理（tar 格式 ipk / 内层 data.tar.gz）
             if tar -tf "$core_pkg" >/dev/null 2>&1; then
-              echo "- tar 分支: 外层 tar 直接可读" >> "$GITHUB_STEP_SUMMARY"
-              # 若外层 tar 内含 data.tar.*（tar 格式 ipk），先解出内层再提取
+              echo "- ipk tar 分支: 外层 tar 直接可读" >> "$GITHUB_STEP_SUMMARY"
               data_entry="$(tar -tf "$core_pkg" | grep -E '(^|/)data\.tar\.' | head -n 1 || true)"
               if [ -n "$data_entry" ]; then
                 data_archive="$core_tmp/$(basename "$data_entry")"
@@ -240,7 +244,7 @@ jobs:
                 extract_from_tar "$core_pkg" && extract_ok=1 || true
               fi
             elif tar -tzf "$core_pkg" >/dev/null 2>&1; then
-              echo "- tar -z 分支: gzip tar" >> "$GITHUB_STEP_SUMMARY"
+              echo "- ipk gzip tar 分支" >> "$GITHUB_STEP_SUMMARY"
               data_entry="$(tar -tzf "$core_pkg" | grep -E '(^|/)data\.tar\.' | head -n 1 || true)"
               if [ -n "$data_entry" ]; then
                 data_archive="$core_tmp/$(basename "$data_entry")"
@@ -257,7 +261,7 @@ jobs:
 
           rm -rf "$core_tmp"
           echo "- extract_ok: $extract_ok" >> "$GITHUB_STEP_SUMMARY"
-          test "$extract_ok" -eq 1 || (echo "Cannot extract dashboard-core from $core_pkg" && file "$core_pkg" && exit 1)
+          test "$extract_ok" -eq 1 || (echo "Cannot extract dashboard-core from $core_pkg" && exit 1)
           core_size="$(wc -c < "$core_out")"
           echo "- core_size: $core_size bytes" >> "$GITHUB_STEP_SUMMARY"
           test "$core_size" -gt 4096 || (echo "Extracted dashboard-core looks too small: ${core_size} bytes" && exit 1)
