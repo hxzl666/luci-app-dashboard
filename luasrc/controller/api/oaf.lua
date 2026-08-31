@@ -1110,12 +1110,25 @@ end
 local function build_status_response()
     local catalog = load_feature_catalog()
     local engine_version, plugin_version, data = get_engine_info()
-    local active_apps, class_stats, domain_source, realtime_domain_count = collect_realtime_feature_overview(catalog)
-    local active_source = "domain-feature:" .. (domain_source or "none")
+    local engine_enabled = tonumber(data.engine_status or data.enable or 0) == 1
+    local active_apps, class_stats, active_source
 
-    if (realtime_domain_count or 0) <= 0 then
-        active_apps, class_stats = collect_usage_overview(catalog)
-        active_source = "appfilter-usage"
+    -- 对齐新版 OAF：只要 OAF 引擎在线，优先使用内核 DPI 的真实识别数据（visit_list / dev_visit_time）
+    -- 修复点：原实现先跑域名启发式（collect_realtime_feature_overview），导致 OAF 真实识别结果几乎永远用不上，
+    -- 用户装了 OAF 却看到"猜"的应用分布 —— 这就是"应用识别有问题"的根因。
+    if engine_enabled then
+        local apps, stats = collect_usage_overview(catalog)
+        if apps and #apps > 0 then
+            active_apps, class_stats = apps, stats
+            active_source = "appfilter-usage"
+        end
+    end
+
+    -- OAF 引擎不可用或没有真实 DPI 数据时，回退到域名启发式
+    if not active_apps or #active_apps == 0 then
+        local domain_source, realtime_domain_count
+        active_apps, class_stats, domain_source, realtime_domain_count = collect_realtime_feature_overview(catalog)
+        active_source = "domain-feature:" .. (domain_source or "none")
     end
     local current_version = trim(read_first_line(VERSION_FILE))
 

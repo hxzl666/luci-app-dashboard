@@ -126,6 +126,72 @@
         };
     }
 
+    /**
+     * 推断设备类型（移动端 / 路由器 / 电脑 / 智能家居等）。
+     * 修复点（对照 luci-app-quickstart 与 OAF 新版的设备识别思路）：
+     * 1. 新增 MAC OUI 厂商前缀识别（Apple/华为/小米等 OUI → mobile）
+     * 2. 修复 "fast" 误判路由器（fast 也可能是电视/设备名，如 "Fast-TV"）
+     * 3. 修复 "smart" 误判手机（smart 前缀更多出现在智能电视/音箱）
+     * 4. "pad/tab" 归为平板（mobile 内部分支），"tv/box/projector" 归为 tv
+     * 5. 无名字设备通过 MAC OUI 判断，不再一律 laptop
+     */
+    const MOBILE_OUI = new Set([
+        'f0:18:98', 'a4:83:e7', 'ac:bc:32', '28:16:ad', 'f8:5c:7d', 'd8:d7:7f',
+        '5c:f9:38', 'b0:e5:ed', 'd4:3a:2c', 'f0:63:91', '8c:85:90', '34:c9:f0',
+        '34:12:98', 'd8:5d:4c', '58:8a:5a', '70:7d:b9', 'b8:27:eb', '0c:7a:c5',
+        'd4:85:64', 'a8:7c:01', '64:77:91', '90:cd:b6', 'c8:9a:8f', '48:8d:36',
+    ]);
+    const ROUTER_OUI = new Set([
+        '00:14:6c', '00:1a:b9', '00:1a:c5', '00:24:a5', '00:26:86', 'd8:5d:e2',
+        'c0:be:c9', '84:d9:31', 'a4:2b:b0', '50:64:2b', '18:31:bf', 'f4:83:cd',
+    ]);
+
+    function classifyDevice(device, gatewayIp) {
+        if (!device || typeof device !== 'object') return 'laptop';
+        const rawName = String(device.name || '').trim();
+        const nameLower = rawName.toLowerCase();
+        const macRaw = String(device.mac || '').replace(/[:-]/g, '').toLowerCase().slice(0, 6);
+        const macOui = macRaw.replace(/(..)(?=.)/g, '$1:');
+        let type = 'laptop';
+
+        // 网关 IP 对比：100% 是上级路由器
+        if (device.ip && gatewayIp && device.ip === gatewayIp && gatewayIp !== '-' && gatewayIp !== '') {
+            return 'router';
+        }
+
+        // 路由器品牌关键词（不含裸 "fast"：Fast/FastCombo 等是电视常见名）
+        const routerKeywords = ['router', 'openwrt', 'tplink', 'tp-link', 'dlink', 'd-link', 'netgear',
+            'linksys', 'mercury', 'tenda', 'totolink', 'miwifi', 'ikuai', 'phicomm', 'gl-inet', 'gl.inet',
+            'repeater', 'extender', 'ap-', '-ap', 'xiaomi router', 'huawei router'];
+        // 手机品牌关键词
+        const mobileKeywords = ['iphone', 'ipad', 'android', 'phone', 'mobile', 'huawei', 'honor',
+            'xiaomi', 'redmi', 'oppo', 'vivo', 'oneplus', 'samsung', 'meizu', 'realme', 'iqoo',
+            'galaxy', 'yi-jia', 'yijia', 'pixel', 'poco', 'nokia', 'sony', 'zte', 'lenovo phone'];
+        // 平板关键词（仍属 mobile 类图标）
+        const padKeywords = ['pad', 'tab', 'tablet'];
+        // 电视/盒子/投影（独立类型 tv）
+        const tvKeywords = ['tv', 'television', 'box', 'projector', 'mi box', 'xiaomi tv', 'hisense',
+            'skyworth', 'tcl', 'konka', 'letv', 'sony bravia', 'amazon fire', 'roku', 'apple tv'];
+
+        if (nameLower && routerKeywords.some(k => nameLower.includes(k))) {
+            type = 'router';
+        } else if (nameLower && tvKeywords.some(k => nameLower.includes(k))) {
+            type = 'tv';
+        } else if (nameLower && mobileKeywords.some(k => nameLower.includes(k))) {
+            type = 'mobile';
+        } else if (nameLower && padKeywords.some(k => nameLower.includes(k))) {
+            type = 'mobile';
+        } else if (macOui && MOBILE_OUI.has(macOui)) {
+            type = 'mobile';
+        } else if (macOui && ROUTER_OUI.has(macOui)) {
+            type = 'router';
+        } else if (!nameLower && macOui && /^(f0|a4|ac|28|d8|b0|34|8c|70|58)/.test(macOui)) {
+            type = 'mobile';
+        }
+
+        return type;
+    }
+
     function deriveTrafficSnapshot(sample, previousState, nowMs) {
         const nextState = {
             interface: sample && sample.interface ? String(sample.interface) : '',
@@ -192,5 +258,6 @@
         deriveTrafficSnapshot: deriveTrafficSnapshot,
         isLikelyDomain: isLikelyDomain,
         filterDomainRows: filterDomainRows,
+        classifyDevice: classifyDevice,
     };
 });

@@ -94,14 +94,29 @@
             </div>
 
             <div class="lg:col-span-8 bg-white rounded-xl shadow-sm border border-gray-100 p-5 relative overflow-hidden flex flex-col h-full min-h-[300px]">
-                <div class="flex items-center justify-between mb-2 flex-none">
+                <div class="flex items-center justify-between mb-3 flex-none">
                     <div class="flex items-center space-x-2">
                         <i data-lucide="activity" class="text-blue-500 w-[18px] h-[18px]"></i>
                         <h2 class="font-medium text-gray-700 m-0">实时网络流量</h2>
                     </div>
-                    <div class="text-[10px] text-gray-500 flex space-x-4 bg-gray-50 px-3 py-1.5 rounded-lg border border-gray-100">
-                        <div><span class="text-blue-500 mr-1">↓</span>下载: <span id="total-down" class="text-blue-600 font-mono font-medium">0 B/s</span></div>
-                        <div><span class="text-emerald-500 mr-1">↑</span>上传: <span id="total-up" class="text-emerald-600 font-mono font-medium">0 B/s</span></div>
+                    <div class="flex items-center space-x-3">
+                        <div class="flex items-center space-x-1.5 text-[10px] text-gray-500">
+                            <div class="w-2 h-2 rounded-full bg-[#20c7f7]"></div><span>下载</span>
+                        </div>
+                        <div class="flex items-center space-x-1.5 text-[10px] text-gray-500">
+                            <div class="w-2 h-2 rounded-full bg-[#553afe]"></div><span>上传</span>
+                        </div>
+                    </div>
+                </div>
+                <!-- 实时速度大字显示（参照 luci-app-quickstart 的 NetworkFlow 风格） -->
+                <div class="grid grid-cols-2 gap-3 mb-3 flex-none">
+                    <div class="bg-gray-50 rounded-lg px-4 py-3 border border-gray-100">
+                        <div class="text-[11px] text-gray-500 mb-1 flex items-center"><span class="w-2 h-2 rounded-full bg-[#20c7f7] mr-1.5"></span>下载速度</div>
+                        <div id="total-down" class="text-xl font-bold font-mono" style="color:#1596fd">0 B/s</div>
+                    </div>
+                    <div class="bg-gray-50 rounded-lg px-4 py-3 border border-gray-100">
+                        <div class="text-[11px] text-gray-500 mb-1 flex items-center"><span class="w-2 h-2 rounded-full bg-[#553afe] mr-1.5"></span>上传速度</div>
+                        <div id="total-up" class="text-xl font-bold font-mono" style="color:#00a63e">0 B/s</div>
                     </div>
                 </div>
                 <div class="w-full flex-1" id="traffic-line-chart"></div>

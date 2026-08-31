@@ -155,3 +155,38 @@ test('aggregates classStats from online_apps when class_stats is empty', () => {
     assert.equal(socialStat.time, 2);
     assert.equal(searchStat.time, 1);
 });
+
+test('classifyDevice: gateway ip is detected as router', () => {
+    const dev = { mac: 'AA:BB:CC:DD:EE:FF', ip: '192.168.1.1', name: 'iPhone' };
+    assert.equal(helpers.classifyDevice(dev, '192.168.1.1'), 'router');
+});
+
+test('classifyDevice: fast keyword no longer misjudged as router (Fast-TV)', () => {
+    const dev = { mac: '00:11:22:33:44:55', ip: '192.168.1.50', name: 'Fast-TV' };
+    assert.equal(helpers.classifyDevice(dev, '192.168.1.1'), 'tv');
+});
+
+test('classifyDevice: smart prefix is tv/other not mobile (Smart-TV)', () => {
+    const dev = { mac: '00:11:22:33:44:55', ip: '192.168.1.51', name: 'Smart-TV' };
+    assert.equal(helpers.classifyDevice(dev, '192.168.1.1'), 'tv');
+});
+
+test('classifyDevice: apple OUI detected as mobile without name', () => {
+    const dev = { mac: 'F0:18:98:12:34:56', ip: '192.168.1.60', name: '' };
+    assert.equal(helpers.classifyDevice(dev, '192.168.1.1'), 'mobile');
+});
+
+test('classifyDevice: xiaomi name detected as mobile', () => {
+    const dev = { mac: '00:11:22:33:44:55', ip: '192.168.1.61', name: 'Xiaomi-13' };
+    assert.equal(helpers.classifyDevice(dev, '192.168.1.1'), 'mobile');
+});
+
+test('classifyDevice: tp-link name detected as router', () => {
+    const dev = { mac: '00:11:22:33:44:55', ip: '192.168.1.62', name: 'TP-Link' };
+    assert.equal(helpers.classifyDevice(dev, '192.168.1.1'), 'router');
+});
+
+test('classifyDevice: unknown name defaults to laptop', () => {
+    const dev = { mac: '00:11:22:33:44:55', ip: '192.168.1.70', name: 'MyPC' };
+    assert.equal(helpers.classifyDevice(dev, '192.168.1.1'), 'laptop');
+});

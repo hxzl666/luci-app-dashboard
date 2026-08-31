@@ -349,46 +349,26 @@
             document.getElementById('active-device-count').innerText = activeCount;
             if (document.getElementById('summary-devices')) document.getElementById('summary-devices').innerText = activeCount;
 
+            // 网关 IP（用于判定上级路由器）
+            const gatewayEl = document.getElementById('gateway');
+            const gatewayIp = gatewayEl ? gatewayEl.innerText.trim() : '';
+
             document.getElementById('devices-list').innerHTML = devs.map(d => {
-                let isMobile = d.type === 'mobile';
-                let isRouter = d.type === 'router';
-
-                // 网关对比：100% 确定为上级路由器
-                const gatewayEl = document.getElementById('gateway');
-                const gatewayIp = gatewayEl ? gatewayEl.innerText.trim() : '';
-                if (d.ip && gatewayIp && d.ip === gatewayIp && gatewayIp !== '-') {
-                    isRouter = true;
-                }
-
-                if (!isMobile && !isRouter && d.name) {
-                    const nameLower = d.name.toLowerCase();
-                    // 优先判定路由器、中继和AP
-                    if (nameLower.includes("router") || nameLower.includes("route") || nameLower.includes("openwrt") ||
-                        nameLower.includes("tplink") || nameLower.includes("tp-link") || nameLower.includes("dlink") ||
-                        nameLower.includes("d-link") || nameLower.includes("netgear") || nameLower.includes("linksys") ||
-                        nameLower.includes("mercury") || nameLower.includes("tenda") || nameLower.includes("totolink") ||
-                        nameLower.includes("fast") || nameLower.includes("miwifi") || nameLower.includes("ikuai") ||
-                        nameLower.includes("phicomm") || nameLower.includes("gl-inet") || nameLower.includes("gl.inet") ||
-                        nameLower.includes("repeater") || nameLower.includes("extender") ||
-                        nameLower.includes("ap-") || nameLower.includes("-ap")) {
-                        isRouter = true;
-                    } else if (nameLower.includes("iphone") || nameLower.includes("ipad") || nameLower.includes("android") ||
-                        nameLower.includes("phone") || nameLower.includes("mobile") ||
-                        nameLower.includes("huawei") || nameLower.includes("honor") || nameLower.includes("xiaomi") ||
-                        nameLower.includes("redmi") || nameLower.includes("oppo") || nameLower.includes("vivo") ||
-                        nameLower.includes("oneplus") || nameLower.includes("samsung") || nameLower.includes("meizu") ||
-                        nameLower.includes("realme") || nameLower.includes("iqoo") || nameLower.includes("galaxy") ||
-                        nameLower.includes("pad") || nameLower.includes("tab") ||
-                        nameLower.includes("yi-jia") || nameLower.includes("yijia")) {
-                        isMobile = true;
-                    }
-                }
+                // 使用 dashboard-data 中的纯函数 classifyDevice（含 MAC OUI 识别与关键词修复）
+                const type = (typeof dashboardData.classifyDevice === 'function')
+                    ? dashboardData.classifyDevice(d, gatewayIp)
+                    : 'laptop';
+                const isMobile = type === 'mobile';
+                const isRouter = type === 'router';
+                const isTv = type === 'tv';
 
                 let iconName = 'laptop';
                 if (isMobile) {
                     iconName = 'smartphone';
                 } else if (isRouter) {
                     iconName = 'router';
+                } else if (isTv) {
+                    iconName = 'tv';
                 }
 
                 return `
@@ -875,17 +855,21 @@
         if (!hasEcharts) console.error('[Dashboard] echarts is not loaded.');
         const lineChart = hasEcharts ? echarts.init(document.getElementById('traffic-line-chart')) : emptyChart;
         lineChart.setOption({
+            animation: false,
             tooltip: { trigger: 'axis', backgroundColor: 'rgba(255, 255, 255, 0.95)', textStyle: { color: '#1e293b' }, formatter: function (p) {
                 let r = `<div style="font-weight:bold;margin-bottom:4px;color:#475569;">${p[0].axisValue}</div>`;
                 p.forEach(x => { r += `<div style="display:flex;align-items:center;margin-top:2px;"><span style="display:inline-block;margin-right:5px;border-radius:10px;width:9px;height:9px;background-color:${x.color};"></span><span style="margin-right:12px;color:#64748b;">${x.seriesName}:</span><span style="font-family:monospace;font-weight:500;color:#1e293b;">${formatBytes(x.value)}/s</span></div>`; });
                 return r;
             }}, 
-            legend: { data: ['Down', 'Up'], top: 0, itemWidth: 10, textStyle: { color: '#64748b' } },
-            grid: { left: '1%', right: '2%', bottom: '0%', top: '15%', containLabel: true },
-            xAxis: { type: 'category', boundaryGap: false, data: [], axisLine: { lineStyle: { color: '#cbd5e1' } }, axisLabel: { color: '#64748b' } },
-            yAxis: { type: 'value', axisLabel: { formatter: (v) => formatBytes(v) + '/s', fontSize: 9, color: '#64748b' }, splitLine: { lineStyle: { color: '#e2e8f0', type: 'dashed' } } },
-            series: [{ name: 'Down', type: 'line', smooth: true, symbol: 'none', itemStyle: { color: '#3b82f6' }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(59, 130, 246, 0.3)' }, { offset: 1, color: 'rgba(59, 130, 246, 0.01)' }]) }, data: [] },
-                     { name: 'Up', type: 'line', smooth: true, symbol: 'none', itemStyle: { color: '#10b981' }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(16, 185, 129, 0.3)' }, { offset: 1, color: 'rgba(16, 185, 129, 0.01)' }]) }, data: [] }]
+            // 参照 luci-app-quickstart NetworkFlow.vue：隐藏坐标轴、纯渐变面积图
+            legend: { show: false },
+            grid: { left: '0%', right: '0%', bottom: '0%', top: '4%', containLabel: false },
+            xAxis: { type: 'category', boundaryGap: false, data: [], show: false },
+            yAxis: { type: 'value', show: false, minInterval: 1024 },
+            series: [
+                { name: '下载', type: 'line', smooth: true, symbol: 'none', showSymbol: false, symbolSize: 0, lineStyle: { width: 2, color: '#20c7f7' }, itemStyle: { color: '#20c7f7' }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(32, 199, 247, 0.85)' }, { offset: 1, color: 'rgba(32, 199, 247, 0.05)' }]) }, data: [] },
+                { name: '上传', type: 'line', smooth: true, symbol: 'none', showSymbol: false, symbolSize: 0, lineStyle: { width: 2, color: '#553afe' }, itemStyle: { color: '#553afe' }, areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(85, 58, 254, 0.85)' }, { offset: 1, color: 'rgba(85, 58, 254, 0.05)' }]) }, data: [] }
+            ]
         });
 
         // 初始化应用分布饼图 (ECharts)
