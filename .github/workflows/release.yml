@@ -71,8 +71,12 @@ jobs:
           app_pkg="$(find bin -type f -name "luci-app-dashboard_*.${ext}" | sort | head -n 1)"
           i18n_pkg="$(find bin -type f -name "luci-i18n-dashboard-zh-cn_*.${ext}" | sort | head -n 1)"
 
-          test -n "$app_pkg" || (echo "Missing luci-app-dashboard ${ext}" && exit 1)
-          test -n "$i18n_pkg" || (echo "Missing luci-i18n-dashboard-zh-cn ${ext}" && exit 1)
+          if [ -z "$app_pkg" ] || [ -z "$i18n_pkg" ]; then
+            echo "::error::DEBUG bin tree:"
+            find bin -type f 2>/dev/null | sort | head -60 || true
+            echo "::error::DEBUG luci find: $(find bin -type f -name "*dashboard*" 2>/dev/null | tr '\n' ' ')"
+            echo "Missing luci packages (${ext})" && exit 1
+          fi
 
           cp -f "$app_pkg" "dist/luci-app-dashboard${suffix}.${ext}"
           cp -f "$i18n_pkg" "dist/luci-i18n-dashboard-zh-cn${suffix}.${ext}"
@@ -163,7 +167,12 @@ jobs:
           find bin -type f -name "*.${ext}" | sort
 
           core_pkg="$(find bin -type f -name "dashboard-core_*.${ext}" | sort | head -n 1)"
-          test -n "$core_pkg" || (echo "Missing dashboard-core ${ext}" && exit 1)
+          if [ -z "$core_pkg" ]; then
+            echo "::error::DEBUG bin tree:"
+            find bin -type f 2>/dev/null | sort | head -50 || true
+            echo "::error::DEBUG find dashboard-core_*.${ext}: $(find bin -type f -name "dashboard-core_*.${ext}" 2>/dev/null | tr '\n' ' ')"
+            echo "Missing dashboard-core ${ext}" && exit 1
+          fi
 
           core_arch="$(basename "$core_pkg" ".${ext}" | sed -E 's/^dashboard-core_[^_]+_(.+)$/\1/')"
           test -n "$core_arch" || (echo "Cannot parse dashboard-core architecture from $core_pkg" && exit 1)
