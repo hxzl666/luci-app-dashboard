@@ -203,8 +203,15 @@ jobs:
             echo "- 提取: apk v3 容器 → apk-tools 解包" >> "$GITHUB_STEP_SUMMARY"
             # runner 是 x86_64，下载静态 apk 二进制
             APK_TOOL="$core_tmp/apk.static"
-            if ! curl -sL --max-time 60 -o "$APK_TOOL" "https://gitlab.alpinelinux.org/api/v4/projects/5/packages/generic/v3.0.8/x86_64/apk.static"; then
-              echo "::error::apk-tools 下载失败" && exit 1
+            APK_DL_OK=0
+            for attempt in 1 2 3; do
+              if curl -sL --retry 3 --retry-all-errors --max-time 90 -o "$APK_TOOL" "https://gitlab.alpinelinux.org/api/v4/projects/5/packages/generic/v3.0.8/x86_64/apk.static"; then
+                [ -s "$APK_TOOL" ] && APK_DL_OK=1 && break
+              fi
+              echo "::warning::apk-tools 下载失败(第${attempt}次)，重试..." && sleep 5
+            done
+            if [ "$APK_DL_OK" -ne 1 ]; then
+              echo "::error::apk-tools 下载失败(已重试3次)" && exit 1
             fi
             chmod +x "$APK_TOOL"
             "$APK_TOOL" --version >/dev/null 2>&1 || { echo "::error::apk-tools 不是 x86_64 可执行" && exit 1; }
